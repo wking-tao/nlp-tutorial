@@ -81,6 +81,8 @@ class MultiHeadAttention(nn.Module):
         self.W_Q = nn.Linear(d_model, d_k * n_heads)
         self.W_K = nn.Linear(d_model, d_k * n_heads)
         self.W_V = nn.Linear(d_model, d_v * n_heads)
+        self.linear = nn.Linear(n_heads * d_v, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
     def forward(self, Q, K, V, attn_mask):
         # q: [batch_size x len_q x d_model], k: [batch_size x len_k x d_model], v: [batch_size x len_k x d_model]
         residual, batch_size = Q, Q.size(0)
@@ -94,20 +96,20 @@ class MultiHeadAttention(nn.Module):
         # context: [batch_size x n_heads x len_q x d_v], attn: [batch_size x n_heads x len_q(=len_k) x len_k(=len_q)]
         context, attn = ScaledDotProductAttention()(q_s, k_s, v_s, attn_mask)
         context = context.transpose(1, 2).contiguous().view(batch_size, -1, n_heads * d_v) # context: [batch_size x len_q x n_heads * d_v]
-        output = nn.Linear(n_heads * d_v, d_model)(context)
-        return nn.LayerNorm(d_model)(output + residual), attn # output: [batch_size x len_q x d_model]
+        output = self.linear(context)
+        return self.layer_norm(output + residual), attn # output: [batch_size x len_q x d_model]
 
 class PoswiseFeedForwardNet(nn.Module):
     def __init__(self):
         super(PoswiseFeedForwardNet, self).__init__()
         self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-
+        self.layer_norm = nn.LayerNorm(d_model)
     def forward(self, inputs):
         residual = inputs # inputs : [batch_size, len_q, d_model]
         output = nn.ReLU()(self.conv1(inputs.transpose(1, 2)))
         output = self.conv2(output).transpose(1, 2)
-        return nn.LayerNorm(d_model)(output + residual)
+        return self.layer_norm(output + residual)
 
 class EncoderLayer(nn.Module):
     def __init__(self):
@@ -117,6 +119,7 @@ class EncoderLayer(nn.Module):
 
     def forward(self, enc_inputs, enc_self_attn_mask):
         enc_outputs, attn = self.enc_self_attn(enc_inputs, enc_inputs, enc_inputs, enc_self_attn_mask) # enc_inputs to same Q,K,V
+        assert enc_outputs.device == torch.device('cuda:0')
         enc_outputs = self.pos_ffn(enc_outputs) # enc_outputs: [batch_size x len_q x d_model]
         return enc_outputs, attn
 
@@ -184,7 +187,7 @@ class Transformer(nn.Module):
         return dec_logits.view(-1, dec_logits.size(-1)), enc_self_attns, dec_self_attns, dec_enc_attns
 
 model = Transformer()
-
+model = model.cuda()
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
